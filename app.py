@@ -316,57 +316,55 @@ def generate_custom_voice(text, language, speaker, instruct, model_size, remove_
     except Exception as e:
         return None, f"Error: {e}", None, None, None, None
 
-def smart_generate_clone(ref_audio, ref_text, target_text, language, mode, model_size, remove_silence, make_subs):
+def smart_generate_clone(ref_audio, ref_text, target_text, language, use_xvector_only, model_size, remove_silence, make_subs):
     if not target_text or not target_text.strip(): return None, "Error: Target text is required.", None, None, None, None
     if not ref_audio: return None, "Error: Ref audio required.", None, None, None, None
 
-    # 1. Mode & Transcript Logic
-    use_xvector_only = ("Fast" in mode)
-    final_ref_text = ref_text
+    # 1. 音频处理
     audio_tuple = _audio_to_tuple(ref_audio)
 
+    # 2. 根据勾选框判断是否需要参考文本
     if not use_xvector_only:
-        if not final_ref_text or not final_ref_text.strip():
-            print("Auto-transcribing reference...")
-            try:
-                final_ref_text = transcribe_reference(ref_audio, True, language)
-                if not final_ref_text or "Error" in final_ref_text:
-                     return None, f"Transcription failed: {final_ref_text}", None, None, None, None
-            except Exception as e:
-                return None, f"Transcribe Error: {e}", None, None, None, None
+        # 如果没有勾选 x-vector，则必须手动输入参考文本
+        if not ref_text or not ref_text.strip():
+             return None, "Error: 请输入参考文本，或者勾选 'Use x-vector only' 选项。", None, None, None, None
+        final_ref_text = ref_text.strip()
     else:
+        # 如果勾选了 x-vector，则不需要文本
         final_ref_text = None
 
     try:
-        # 2. Chunk Target Text
+        # 3. 文本分块
         text_chunks, tts_filename = text_chunk(target_text, language, char_limit=280)
         chunk_files = []
         tts = get_model("Base", model_size)
 
-        # 3. Generate Loop
+        # 4. 循环生成音频
         for i, chunk in enumerate(text_chunks):
             wavs, sr = tts.generate_voice_clone(
                 text=chunk.strip(),
                 language=language,
                 ref_audio=audio_tuple,
-                ref_text=final_ref_text.strip() if final_ref_text else None,
-                x_vector_only_mode=use_xvector_only,
+                ref_text=final_ref_text,
+                x_vector_only_mode=use_xvector_only, # 传入布尔值
                 max_new_tokens=2048,
             )
-            # Save immediately
+            # 立即保存
             temp_filename = f"temp_clone_{i}_{os.getpid()}.wav"
             sf.write(temp_filename, wavs[0], sr)
             chunk_files.append(temp_filename)
 
-            # Clear memory
+            # 清理内存
             del wavs
             torch.cuda.empty_cache()
             gc.collect()
 
-        # 4. Stitch & Process
+        # 5. 拼接与处理
         stitched_file = stitch_chunk_files(chunk_files,tts_filename)
         final_audio, srt1, srt2, srt3, srt4 = process_audio_output(stitched_file, make_subs, remove_silence, language)
-        return final_audio, f"Success! Mode: {mode}", srt1, srt2, srt3, srt4
+        
+        mode_str = "x-vector (Fast)" if use_xvector_only else "High-Quality"
+        return final_audio, f"Success! Mode: {mode_str}", srt1, srt2, srt3, srt4
 
     except Exception as e:
         return None, f"Error: {e}", None, None, None, None
@@ -377,6 +375,12 @@ def smart_generate_clone(ref_audio, ref_text, target_text, language, mode, model
 def on_mode_change(mode):
     return gr.update(visible=("High-Quality" in mode))
 
+
+# 当勾选框状态改变时，隐藏或显示参考文本输入框
+def on_xvector_change(use_xvector):
+    return gr.update(visible=not use_xvector)
+
+
 def build_ui():
     theme = gr.themes.Soft(font=[gr.themes.GoogleFont("Source Sans Pro"), "Arial", "sans-serif"])
     css = ".gradio-container {max-width: none !important;} .tab-content {padding: 20px;}"
@@ -385,7 +389,6 @@ def build_ui():
         gr.HTML("""
         <div style="text-align: center; margin: 20px auto; max-width: 800px;">
             <h1 style="font-size: 2.5em; margin-bottom: 5px;">🎙️ Qwen3-TTS </h1>
-            <a href="https://colab.research.google.com/github/NeuralFalconYT/Qwen3-TTS-Colab/blob/main/Qwen3_TTS_Colab.ipynb" target="_blank" style="display: inline-block; padding: 10px 20px; background-color: #4285F4; color: white; border-radius: 6px; text-decoration: none; font-size: 1em;">🥳 Run on Google Colab</a>
         </div>""")
 
         with gr.Tabs():
@@ -401,15 +404,13 @@ def build_ui():
                         design_btn = gr.Button("Generate with Custom Voice", variant="primary")
                         with gr.Accordion("More options", open=False):
                             with gr.Row():
-                              design_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
-                              design_make_subs = gr.Checkbox(label="Generate Subtitles", value=False)
-                        
-                        
+                                design_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
+                                design_make_subs = gr.Checkbox(label="Generate Subtitles", value=False)
 
                     with gr.Column(scale=2):
                         design_audio_out = gr.Audio(label="Generated Audio", type="filepath")
                         design_status = gr.Textbox(label="Status", interactive=False)
-                        
+
                         with gr.Accordion("📝 Subtitles", open=False):
                             with gr.Row():
                                 d_srt1 = gr.File(label="Original (Whisper)")
@@ -428,33 +429,58 @@ def build_ui():
             with gr.Tab("Voice Clone (Base)"):
                 with gr.Row():
                     with gr.Column(scale=2):
-                        clone_target_text = gr.Textbox(label="Target Text", lines=3, placeholder="Enter the text you want the cloned voice to speak...")
-                        clone_ref_audio = gr.Audio(label="Reference Audio (Upload a voice sample to clone)", type="filepath")
-                        
+                        clone_target_text = gr.Textbox(
+                            label="Target Text",
+                            lines=3,
+                            placeholder="Enter the text you want the cloned voice to speak...",
+                        )
+                        clone_ref_audio = gr.Audio(
+                            label="Reference Audio (Upload a voice sample to clone)",
+                            type="filepath",
+                        )
+
                         with gr.Row():
-                            clone_language = gr.Dropdown(label="Language", choices=LANGUAGES, value="Auto",scale=1)
-                            clone_model_size = gr.Dropdown(label="Model Size", choices=MODEL_SIZES, value="1.7B",scale=1)
-                            clone_mode = gr.Dropdown(
-                                label="Mode",
-                                choices=["High-Quality (Audio + Transcript)", "Fast (Audio Only)"],
-                                value="High-Quality (Audio + Transcript)",
-                                interactive=True,
-                                scale=2
+                            clone_language = gr.Dropdown(
+                                label="Language",
+                                choices=LANGUAGES,
+                                value="Auto",
+                                scale=1,
                             )
-                        
-                        clone_ref_text = gr.Textbox(label="Reference Text", lines=2, visible=True)
+                            clone_model_size = gr.Dropdown(
+                                label="Model Size",
+                                choices=MODEL_SIZES,
+                                value="1.7B",
+                                scale=1,
+                            )
+
+                        # 【修改点】新的参考文本框与复选框
+                        clone_ref_text = gr.Textbox(
+                            label="Reference Text (Transcript of the reference audio)",
+                            lines=2,
+                            placeholder="请输入参考音频中朗读的确切文本......",
+                            visible=True,
+                        )
+                        clone_use_xvector = gr.Checkbox(
+                            label="Use x-vector only (No reference text needed, but lower quality)",
+                            value=False,
+                        )
+
                         clone_btn = gr.Button("Clone & Generate", variant="primary")
                         with gr.Accordion("More options", open=False):
                             with gr.Row():
-                              clone_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
-                              clone_make_subs = gr.Checkbox(label="Generate Subtitles", value=False)
-
-                        
+                                clone_rem_silence = gr.Checkbox(
+                                    label="Remove Silence", value=False
+                                )
+                                clone_make_subs = gr.Checkbox(
+                                    label="Generate Subtitles", value=False
+                                )
 
                     with gr.Column(scale=2):
-                        clone_audio_out = gr.Audio(label="Generated Audio", type="filepath")
+                        clone_audio_out = gr.Audio(
+                            label="Generated Audio", type="filepath"
+                        )
                         clone_status = gr.Textbox(label="Status", interactive=False)
-                        
+
                         with gr.Accordion("📝 Subtitles", open=False):
                             with gr.Row():
                                 c_srt1 = gr.File(label="Original")
@@ -463,13 +489,37 @@ def build_ui():
                                 c_srt3 = gr.File(label="Word-level")
                                 c_srt4 = gr.File(label="Shorts/Reels")
 
-                clone_mode.change(on_mode_change, inputs=[clone_mode], outputs=[clone_ref_text])
-                clone_ref_audio.change(transcribe_reference, inputs=[clone_ref_audio, clone_mode, clone_language], outputs=[clone_ref_text])
-                
+                # 【修改点】绑定新的事件逻辑
+                clone_use_xvector.change(
+                    on_xvector_change,
+                    inputs=[clone_use_xvector],
+                    outputs=[clone_ref_text],
+                )
+
+                # 【删除原有的自动识别事件绑定】
+                # (即删除原来调用 transcribe_reference 的 clone_ref_audio.change 这一行)
+
+                # 更新按钮点击事件传递的参数
                 clone_btn.click(
                     smart_generate_clone,
-                    inputs=[clone_ref_audio, clone_ref_text, clone_target_text, clone_language, clone_mode, clone_model_size, clone_rem_silence, clone_make_subs],
-                    outputs=[clone_audio_out, clone_status, c_srt1, c_srt2, c_srt3, c_srt4]
+                    inputs=[
+                        clone_ref_audio,
+                        clone_ref_text,
+                        clone_target_text,
+                        clone_language,
+                        clone_use_xvector,
+                        clone_model_size,
+                        clone_rem_silence,
+                        clone_make_subs,
+                    ],
+                    outputs=[
+                        clone_audio_out,
+                        clone_status,
+                        c_srt1,
+                        c_srt2,
+                        c_srt3,
+                        c_srt4,
+                    ],
                 )
 
             # --- Tab 3: TTS (CustomVoice) ---
@@ -487,15 +537,13 @@ def build_ui():
                         tts_btn = gr.Button("Generate Speech", variant="primary")
                         with gr.Accordion("More options", open=False):
                             with gr.Row():
-                              tts_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
-                              tts_make_subs = gr.Checkbox(label="Generate Subtitles", value=False)
-                            
-                        
+                                tts_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
+                                tts_make_subs = gr.Checkbox(label="Generate Subtitles", value=False)
 
                     with gr.Column(scale=2):
                         tts_audio_out = gr.Audio(label="Generated Audio", type="filepath")
                         tts_status = gr.Textbox(label="Status", interactive=False)
-                        
+
                         with gr.Accordion("📝 Subtitles", open=False):
                             with gr.Row():
                                 t_srt1 = gr.File(label="Original")
@@ -542,7 +590,6 @@ def build_ui():
                 </ul>
                 """)
 
-             
     return demo
 
 # if __name__ == "__main__":
