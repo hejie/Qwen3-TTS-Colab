@@ -160,7 +160,7 @@ def process_audio_output(audio_path, make_subtitle, remove_silence, language="Au
     final_audio_path = audio_path
     if remove_silence:
         final_audio_path = remove_silence_function(audio_path)
-    
+
     # 2. Generate Subtitles
     default_srt, custom_srt, word_srt, shorts_srt = None, None, None, None
     if make_subtitle:
@@ -175,37 +175,67 @@ def process_audio_output(audio_path, make_subtitle, remove_silence, language="Au
 
     return final_audio_path, default_srt, custom_srt, word_srt, shorts_srt
 
-def stitch_chunk_files(chunk_files,output_filename):
+import os
+import subprocess
+
+
+def stitch_chunk_files(chunk_files, output_filename):
     """
-    Takes a list of file paths.
-    Stitches them into one file.
-    Deletes the temporary chunk files.
+    使用 FFmpeg 命令行拼接音频文件。
+    极大地减少内存占用，非常适合处理超长文本生成的音频。
     """
     if not chunk_files:
         return None
 
-    combined_audio = AudioSegment.empty()
-    
-    print(f"Stitching {len(chunk_files)} audio files...")
-    for f in chunk_files:
-        try:
-            segment = AudioSegment.from_wav(f)
-            combined_audio += segment
-        except Exception as e:
-            print(f"Error appending chunk {f}: {e}")
+    print(f"Stitching {len(chunk_files)} audio files using FFmpeg...")
 
-    # output_filename = f"final_output_{os.getpid()}.wav"
-    combined_audio.export(output_filename, format="wav")
-    
-    # Clean up temp files
-    for f in chunk_files:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-        except Exception as e:
-            print(f"Warning: Could not delete temp file {f}: {e}")
-            
+    # 1. 创建一个包含所有分段文件路径的清单文件 (txt)
+    list_filename = f"concat_list_{os.getpid()}.txt"
+    with open(list_filename, "w", encoding="utf-8") as f:
+        for chunk_file in chunk_files:
+            # FFmpeg 要求的格式： file '文件路径'
+            # 必须使用绝对路径以防找不到文件
+            f.write(f"file '{os.path.abspath(chunk_file)}'\n")
+
+    try:
+        # 2. 调用 FFmpeg 进行直接无损拼接 (-c copy)
+        # 这样处理不需要解码和重新编码，速度极快且不占内存
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_filename,
+                "-c",
+                "copy",
+                output_filename,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error during FFmpeg concatenation: {e}")
+        return None
+    finally:
+        # 3. 清理临时清单文件
+        if os.path.exists(list_filename):
+            os.remove(list_filename)
+
+        # 4. 清理临时的音频分段文件
+        for f in chunk_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception as e:
+                print(f"Warning: Could not delete temp file {f}: {e}")
+
     return output_filename
+
 
 # --- Generators (Memory Optimized) ---
 
@@ -518,7 +548,6 @@ def build_ui():
 # if __name__ == "__main__":
 #     demo = build_ui()
 #     demo.launch(share=True, debug=True)
-
 
 
 import click
